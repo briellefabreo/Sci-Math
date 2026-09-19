@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+<title>Sci-Math Challenge</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;600;700&family=Baloo+2:wght@500;700;800&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  :root{
+    --purple:#6C4FE0; --purple-dark:#4C33A8; --pink:#FF4F9A; --cyan:#26E5D9;
+    --yellow:#FFD23F; --green:#4CE07A; --red:#FF5A5A; --navy:#161033;
+  }
+  html,body{font-family:'Baloo 2', sans-serif; background:var(--navy); color:#fff; margin:0;}
+  .font-display{font-family:'Fredoka', sans-serif;}
+  .block-card{
+    background:linear-gradient(145deg, #2A2157, #1D1740);
+    border:3px solid #3E3475;
+    border-radius:20px;
+    box-shadow: 0 6px 0 #0E0A24, 0 10px 24px rgba(0,0,0,.4);
+  }
+  .btn-block{
+    border-radius:16px;
+    border-bottom:5px solid rgba(0,0,0,.25);
+    font-weight:800;
+    letter-spacing:.02em;
+    transition: transform .08s ease, filter .15s ease;
+  }
+  .btn-block:active{ transform: translateY(4px); border-bottom-width:1px; }
+  .btn-block:disabled{ opacity:.45; cursor:not-allowed; }
+  .xp-bar-bg{ background:#241C4B; border-radius:999px; overflow:hidden; border:2px solid #3E3475;}
+  .xp-bar-fill{ background:linear-gradient(90deg, var(--cyan), var(--green)); height:100%; transition:width .4s ease;}
+  @keyframes pop { 0%{transform:scale(.85); opacity:0} 60%{transform:scale(1.05)} 100%{transform:scale(1); opacity:1} }
+  .pop-in{ animation: pop .35s ease-out; }
+  @keyframes floatY { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-8px)} }
+  .float{ animation: floatY 3s ease-in-out infinite; }
+  @keyframes pulseWarn { 0%,100%{ box-shadow:0 0 0 0 rgba(255,90,90,.6)} 50%{ box-shadow:0 0 0 12px rgba(255,90,90,0)} }
+  .timer-warn{ animation: pulseWarn 1s infinite; }
+  .choice-btn{ transition: all .12s ease; }
+  .choice-btn.correct{ background:var(--green) !important; color:#0E0A24 !important; }
+  .choice-btn.wrong{ background:var(--red) !important; }
+  ::-webkit-scrollbar{ width:8px; } ::-webkit-scrollbar-thumb{ background:#3E3475; border-radius:8px;}
+  .confetti-piece{ position:fixed; top:-10px; z-index:60; border-radius:2px; }
+  .block-icon{ display:inline-block; width:1em; height:1em; }
+</style>
+</head>
+<body>
+
+<div id="app" class="min-h-screen flex flex-col"></div>
+
+<script type="module">
+import { firebaseConfig } from './firebase-config.js';
+import { QUESTIONS, getQuestionFor, isCorrectAnswer } from './questions.js';
+
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+import {
+  getAuth, signInAnonymously, onAuthStateChanged, signOut
+} from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
+import {
+  getFirestore, doc, getDoc, setDoc, collection, query, where, orderBy,
+  getDocs, onSnapshot
+} from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+const root = document.getElementById('app');
+const TOTAL_DAYS = 10;
+
+let state = {
+  uid: null,
+  player: null,      // players/{uid} doc data
+  settings: { day: 1, isOpen: true, revealFinal: false },
+  todayResult: null,
+  timer: null,
+};
+
+// ---------- helpers ----------
+function html(strings, ...vals){ return strings.reduce((a,s,i)=>a+s+(vals[i]??''),''); }
+function levelLabel(l){ return l==='JH' ? 'Junior High' : 'Senior High'; }
+function subjectIcon(s){ return s==='Math' ? '➗' : '🧪'; }
+
+async function loadSettings(){
+  try{
+    const snap = await getDoc(doc(db,'settings','current'));
+    if (snap.exists()) state.settings = { day:1, isOpen:true, revealFinal:false, ...snap.data() };
+  }catch(e){ console.warn('settings load failed, using defaults', e); }
+}
+
+async function loadPlayer(){
+  const snap = await getDoc(doc(db,'players', state.uid));
+  state.player = snap.exists() ? snap.data() : null;
+}
+
+async function loadTodayResult(){
+  if (!state.player) { state.todayResult = null; return; }
+  const rid = `${state.uid}_day${state.settings.day}`;
+  const snap = await getDoc(doc(db,'results', rid));
+  state.todayResult = snap.exists() ? snap.data() : null;
+}
+
+async function getCompletedDays(){
+  const q = query(collection(db,'results'), where('playerId','==', state.uid));
+  const snap = await getDocs(q);
+  const days = {};
+  snap.forEach(d => { days[d.data().day] = d.data(); });
+  return days;
+}
+
+async function getTotalPoints(){
+  const days = await getCompletedDays();
+  return Object.values(days).reduce((sum,r)=> sum + (r.score||0), 0);
+}
+
+async function getDailyLeaderboard(level, day){
+  const q = query(collection(db,'results'), where('level','==', level), where('day','==', day));
+  const snap = await getDocs(q);
+  const rows = [];
+  snap.forEach(d => rows.push(d.data()));
+  rows.sort((a,b)=> b.score - a.score || a.timeUsedSec - b.timeUsedSec);
+  return rows;
+}
+
+async function getOverallLeaderboard(level){
+  const q = query(collection(db,'results'), where('level','==', level));
+  const snap = await getDocs(q);
+  const totals = {};
+  snap.forEach(d => {
+    const r = d.data();
+    if (!totals[r.playerId]) totals[r.playerId] = { playerId:r.playerId, name:r.playerName, total:0 };
+    totals[r.playerId].total += (r.score||0);
+  });
+  return Object.values(totals).sort((a,b)=> b.total - a.total);
+}
+
+// ---------- render shell ----------
+function renderNav(active){
+  return html`
+  <div class="w-full sticky top-0 z-40 bg-[#1D1740]/95 backdrop-blur border-b-2 border-[#3E3475] px-4 py-3 flex items-center justify-between">
+    <div class="font-display text-xl font-700 flex items-center gap-2">
+      <span>🎮</span><span class="hidden xs:inline">SCI-MATH</span> CHALLENGE
+    </div>
+    ${state.player ? html`
+      <button id="nav-leaderboard" class="btn-block bg-[#FFD23F] text-[#1D1740] text-sm px-3 py-2">🏆 Leaderboard</button>
+    ` : ''}
+  </div>`;
+}
+
+function playerBadge(){
+  if (!state.player) return '';
+  const p = state.player;
+  return html`
+  <div class="block-card p-4 flex items-center gap-4 mx-4 mt-4 pop-in">
+    <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-[var(--pink)] to-[var(--purple)] flex items-center justify-center text-2xl font-display font-700 shrink-0">
+      ${p.fullName.trim().charAt(0).toUpperCase() || '?'}
+    </div>
+    <div class="min-w-0">
+      <div class="font-display font-700 text-lg truncate">${p.fullName}</div>
+      <div class="text-sm text-[#B8AEE8]">${levelLabel(p.level)} • Grade ${p.grade} • Section ${p.section}</div>
+    </div>
+  </div>`;
+}
+
+// ---------- REGISTRATION ----------
+function renderRegister(){
+  root.innerHTML = html`
+    ${renderNav()}
+    <div class="flex-1 flex items-center justify-center p-4">
+      <div class="block-card w-full max-w-md p-6 pop-in">
+        <div class="text-center mb-5">
+          <div class="text-4xl mb-1 float">🎮</div>
+          <div class="font-display text-2xl font-700">JOIN THE CHALLENGE</div>
+          <div class="text-[#B8AEE8] text-sm mt-1">10 Days. 10 Challenges. One Champion.</div>
+        </div>
+        <form id="reg-form" class="space-y-4">
+          <div>
+            <label class="block text-sm font-700 mb-1">FULL NAME (real name)</label>
+            <input required id="f-name" type="text" placeholder="Juan Dela Cruz"
+              class="w-full rounded-xl bg-[#241C4B] border-2 border-[#3E3475] px-4 py-3 outline-none focus:border-[var(--cyan)]" />
+          </div>
+          <div>
+            <label class="block text-sm font-700 mb-1">LEVEL</label>
+            <div class="grid grid-cols-2 gap-3">
+              <label class="level-opt block-card p-3 text-center cursor-pointer border-2 border-transparent">
+                <input type="radio" name="level" value="JH" class="hidden"> <div class="font-display font-700">🧒 JH</div>
+                <div class="text-xs text-[#B8AEE8]">Junior High</div>
+              </label>
+              <label class="level-opt block-card p-3 text-center cursor-pointer border-2 border-transparent">
+                <input type="radio" name="level" value="SH" class="hidden"> <div class="font-display font-700">🧑‍🎓 SH</div>
+                <div class="text-xs text-[#B8AEE8]">Senior High</div>
+              </label>
+            </div>
+          </div>
+          <div>
+            <label class="block text-sm font-700 mb-1">GRADE LEVEL</label>
+            <select required id="f-grade" class="w-full rounded-xl bg-[#241C4B] border-2 border-[#3E3475] px-4 py-3 outline-none focus:border-[var(--cyan)]">
+              <option value="">Select grade</option>
+              ${[7,8,9,10,11,12].map(g=>`<option value="${g}">Grade ${g}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-700 mb-1">SECTION</label>
+            <input required id="f-section" type="text" placeholder="e.g. Sampaguita"
+              class="w-full rounded-xl bg-[#241C4B] border-2 border-[#3E3475] px-4 py-3 outline-none focus:border-[var(--cyan)]" />
+          </div>
+          <p id="reg-error" class="text-[var(--red)] text-sm hidden"></p>
+          <button type="submit" class="btn-block w-full bg-[var(--cyan)] text-[#0E0A24] text-lg py-3">🎮 ENTER THE CHALLENGE</button>
+        </form>
+      </div>
+    </div>
+  `;
+
+  root.querySelectorAll('.level-opt').forEach(lbl=>{
+    lbl.addEventListener('click', ()=>{
+      root.querySelectorAll('.level-opt').forEach(o=>o.classList.remove('border-[var(--cyan)]'));
+      lbl.classList.add('border-[var(--cyan)]');
+    });
+  });
+
+  root.querySelector('#reg-form').addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    const fullName = root.querySelector('#f-name').value.trim();
+    const level = root.querySelector('input[name=level]:checked')?.value;
+    const grade = root.querySelector('#f-grade').value;
+    const section = root.querySelector('#f-section').value.trim();
+    const err = root.querySelector('#reg-error');
+    if (!fullName || !level || !grade || !section){
+      err.textContent = 'Please fill in every field.'; err.classList.remove('hidden'); return;
+    }
+    try{
+      await setDoc(doc(db,'players', state.uid), {
+        fullName, level, grade, section, registeredAt: Date.now(),
+      });
+      await loadPlayer();
+      await boot();
+    }catch(e2){
+      console.error(e2);
+      err.textContent = 'Could not register — please check your connection and try again.';
+      err.classList.remove('hidden');
+    }
+  });
+}
+
+// ---------- LOBBY ----------
+async function renderLobby(){
+  const days = await getCompletedDays();
+  const totalPoints = Object.values(days).reduce((s,r)=>s+(r.score||0),0);
+  const day = state.settings.day;
+  const isOpen = state.settings.isOpen;
+  const already = days[day];
+
+  let rankLine = '';
+  if (already){
+    const board = await getDailyLeaderboard(state.player.level, day);
+    const rank = board.findIndex(r=>r.playerId===state.uid) + 1;
+    rankLine = rank ? `Rank #${rank} of ${board.length} today` : '';
+  }
+
+  const dayGrid = Array.from({length:TOTAL_DAYS}, (_,i)=>i+1).map(d=>{
+    let statusIcon, statusClass;
+    if (days[d]) { statusIcon='✅'; statusClass='bg-[var(--green)]/20 border-[var(--green)]'; }
+    else if (d === day && isOpen) { statusIcon='🎮'; statusClass='bg-[var(--yellow)]/20 border-[var(--yellow)] timer-warn'; }
+    else if (d < day) { statusIcon='⏳'; statusClass='bg-[#241C4B] border-[#3E3475] opacity-60'; }
+    else { statusIcon='🔒'; statusClass='bg-[#241C4B] border-[#3E3475] opacity-40'; }
+    return html`<div class="block-card !shadow-none border-2 ${statusClass} rounded-xl py-3 text-center">
+      <div class="text-lg">${statusIcon}</div><div class="text-xs font-700 mt-1">DAY ${d}</div>
+    </div>`;
+  }).join('');
+
+  let mainAction = '';
+  if (day > TOTAL_DAYS || (day===TOTAL_DAYS && already)){
+    mainAction = html`<button id="btn-finale" class="btn-block w-full bg-gradient-to-r from-[var(--pink)] to-[var(--purple)] text-white text-lg py-4">🎉 VIEW FINAL RESULTS</button>`;
+  } else if (already){
+    mainAction = html`
+    <div class="block-card p-5 text-center pop-in">
+      <div class="text-3xl mb-1">✅</div>
+      <div class="font-display text-xl font-700">CHALLENGE COMPLETED</div>
+      <div class="text-[#B8AEE8] text-sm mb-3">You already completed today's challenge.</div>
+      <div class="grid grid-cols-3 gap-2 text-sm mb-2">
+        <div class="bg-[#241C4B] rounded-xl py-2"><div class="text-[#B8AEE8] text-xs">SCORE</div><div class="font-700 font-display">${already.score}</div></div>
+        <div class="bg-[#241C4B] rounded-xl py-2"><div class="text-[#B8AEE8] text-xs">TIME</div><div class="font-700 font-display">${already.timeUsedSec}s</div></div>
+        <div class="bg-[#241C4B] rounded-xl py-2"><div class="text-[#B8AEE8] text-xs">TOTAL</div><div class="font-700 font-display">${totalPoints}</div></div>
+      </div>
+      <div class="text-xs text-[#B8AEE8]">${rankLine}</div>
+    </div>`;
+  } else if (isOpen){
+    mainAction = html`
+    <div class="text-center">
+      <div class="font-display text-2xl font-700 mb-1">DAY ${day} CHALLENGE READY!</div>
+      <div class="text-[#B8AEE8] text-sm mb-4">One shot. Make it count.</div>
+      <button id="btn-play" class="btn-block w-full bg-[var(--green)] text-[#0E0A24] text-lg py-4 font-display">▶ PLAY TODAY'S GAME</button>
+    </div>`;
+  } else {
+    mainAction = html`
+    <div class="block-card p-5 text-center">
+      <div class="text-3xl mb-1">🔒</div>
+      <div class="font-display text-xl font-700">DAY ${day} NOT AVAILABLE YET</div>
+      <div class="text-[#B8AEE8] text-sm">Check back when the facilitator opens today's challenge.</div>
+    </div>`;
+  }
+
+  root.innerHTML = html`
+    ${renderNav('lobby')}
+    ${playerBadge()}
+    <div class="px-4 mt-4">
+      <div class="flex items-center justify-between text-sm mb-1">
+        <span class="font-700">TOTAL XP</span><span class="font-700">${totalPoints} pts</span>
+      </div>
+      <div class="xp-bar-bg h-4"><div class="xp-bar-fill" style="width:${Math.min(100,(Object.keys(days).length/TOTAL_DAYS)*100)}%"></div></div>
+    </div>
+    <div class="px-4 mt-5">${mainAction}</div>
+    <div class="px-4 mt-6">
+      <div class="font-display font-700 text-sm text-[#B8AEE8] mb-2">10-DAY PROGRESS</div>
+      <div class="grid grid-cols-5 gap-2">${dayGrid}</div>
+    </div>
+    <div class="px-4 mt-6 mb-6 text-center">
+      <button id="btn-switch" class="text-xs text-[#8577C2] underline">Not you? Switch Player</button>
+    </div>
+  `;
+
+  root.querySelector('#nav-leaderboard')?.addEventListener('click', ()=> renderLeaderboard(day));
+  root.querySelector('#btn-play')?.addEventListener('click', ()=> startGame(day));
+  root.querySelector('#btn-finale')?.addEventListener('click', ()=> renderFinale());
+  root.querySelector('#btn-switch')?.addEventListener('click', async ()=>{
+    if (!confirm('Sign out of this account on this device so someone else can register?')) return;
+    await signOut(auth);
+    await signInAnonymously(auth);
+  });
+}
+
+// ---------- GAME ----------
+function startGame(day){
+  const q = getQuestionFor(state.player.level, day);
+  if (!q){ root.innerHTML = `<div class="p-6 text-center">No question configured for this day yet.</div>`; return; }
+
+  let timeLeft = q.timeLimit;
+  let submitted = false;
+  const startedAt = Date.now();
+
+  function renderPrompt(){
+    if (q.type === 'mc'){
+      return html`
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-5" id="choices">
+        ${q.choices.map((c,i)=>html`
+          <button data-i="${i}" class="choice-btn btn-block bg-[#241C4B] border-2 border-[#3E3475] py-4 px-3 text-left font-700">
+            <span class="text-[var(--cyan)] mr-2">${String.fromCharCode(65+i)}.</span>${c}
+          </button>`).join('')}
+      </div>`;
+    }
+    if (q.type === 'clue'){
+      return html`
+      <div class="text-center text-5xl tracking-widest mt-5 mb-4">${q.clues.join('&nbsp;&nbsp;')}</div>
+      <input id="text-answer" autocomplete="off" placeholder="Type the ONE word..."
+        class="w-full rounded-xl bg-[#241C4B] border-2 border-[#3E3475] px-4 py-3 text-center text-lg font-700 outline-none focus:border-[var(--cyan)]" />
+      <button id="btn-submit" class="btn-block w-full bg-[var(--green)] text-[#0E0A24] mt-3 py-3">SUBMIT</button>`;
+    }
+    // id or solve
+    return html`
+      <input id="text-answer" autocomplete="off" placeholder="Type your answer..."
+        class="w-full rounded-xl bg-[#241C4B] border-2 border-[#3E3475] px-4 py-3 text-lg font-700 outline-none focus:border-[var(--cyan)] mt-5" />
+      <button id="btn-submit" class="btn-block w-full bg-[var(--green)] text-[#0E0A24] mt-3 py-3">SUBMIT</button>`;
+  }
+
+  function render(){
+    root.innerHTML = html`
+      <div class="flex-1 flex flex-col p-4 max-w-xl mx-auto w-full">
+        <div class="flex items-center justify-between mb-2">
+          <div class="font-display font-700">DAY ${day} <span class="text-[#B8AEE8] font-normal">• ${state.player.level}</span></div>
+          <div class="font-display font-700 flex items-center gap-1">${subjectIcon(q.subject)} ${q.subject.toUpperCase()}</div>
+        </div>
+        <div class="flex justify-center my-3">
+          <div id="timer-badge" class="block-card w-24 h-24 rounded-full flex items-center justify-center font-display text-3xl font-700">
+            ${timeLeft}
+          </div>
+        </div>
+        <div class="block-card p-5 pop-in">
+          <div class="text-lg leading-snug">${q.prompt}</div>
+          ${renderPrompt()}
+        </div>
+      </div>
+    `;
+    if (q.type==='mc'){
+      root.querySelectorAll('.choice-btn').forEach(btn=>{
+        btn.addEventListener('click', ()=> finish(Number(btn.dataset.i)));
+      });
+    } else {
+      root.querySelector('#btn-submit').addEventListener('click', ()=> finish(root.querySelector('#text-answer').value));
+      root.querySelector('#text-answer').addEventListener('keydown', (e)=>{ if(e.key==='Enter') finish(e.target.value); });
+    }
+  }
+
+  function tick(){
+    timeLeft -= 1;
+    const badge = document.getElementById('timer-badge');
+    if (badge){
+      badge.textContent = Math.max(timeLeft,0);
+      if (timeLeft <= 5){ badge.classList.add('timer-warn'); badge.classList.add('bg-[var(--red)]/30'); }
+    }
+    if (timeLeft <= 0){ clearInterval(state.timer); finish(null, true); }
+  }
+
+  async function finish(rawAnswerOrIndex, timedOut=false){
+    if (submitted) return;
+    submitted = true;
+    clearInterval(state.timer);
+    root.querySelectorAll('button').forEach(b=> b.disabled = true);
+
+    const timeUsedSec = Math.min(q.timeLimit, Math.round((Date.now()-startedAt)/1000));
+    const timeRemaining = Math.max(0, q.timeLimit - timeUsedSec);
+
+    let correct = false;
+    let answerGiven = '';
+    if (timedOut || rawAnswerOrIndex === null){
+      correct = false; answerGiven = '(no answer / time out)';
+    } else if (q.type === 'mc'){
+      correct = rawAnswerOrIndex === q.correctIndex;
+      answerGiven = q.choices[rawAnswerOrIndex] ?? '';
+      root.querySelectorAll('.choice-btn').forEach((btn,i)=>{
+        if (i===q.correctIndex) btn.classList.add('correct');
+        else if (i===rawAnswerOrIndex) btn.classList.add('wrong');
+      });
+    } else {
+      answerGiven = String(rawAnswerOrIndex||'');
+      correct = isCorrectAnswer(q, answerGiven);
+    }
+
+    const speedBonus = correct ? Math.round(q.maxSpeedBonus * (timeRemaining / q.timeLimit)) : 0;
+    const basePts = correct ? q.basePoints : 0;
+    const score = basePts + speedBonus;
+
+    const resultData = {
+      playerId: state.uid, playerName: state.player.fullName, level: state.player.level,
+      grade: state.player.grade, section: state.player.section,
+      day, questionId: q.id, gameType: q.type, subject: q.subject,
+      correct, answerGiven, timeUsedSec, score, timestamp: Date.now(),
+    };
+
+    try{
+      await setDoc(doc(db,'results', `${state.uid}_day${day}`), resultData);
+    }catch(e){
+      console.error('submit failed', e);
+    }
+
+    renderResult(q, resultData, basePts, speedBonus);
+  }
+
+  render();
+  state.timer = setInterval(tick, 1000);
+}
+
+function renderResult(q, r, basePts, speedBonus){
+  root.innerHTML = html`
+    <div class="flex-1 flex items-center justify-center p-4">
+      <div class="block-card w-full max-w-md p-6 text-center pop-in">
+        <div class="text-5xl mb-2">${r.correct ? '🎉' : '💥'}</div>
+        <div class="font-display text-2xl font-700 mb-1">${r.correct ? 'CORRECT!' : 'NOT QUITE!'}</div>
+        ${!r.correct ? `<div class="text-sm text-[#B8AEE8] mb-3">Correct answer: <span class="font-700 text-white">${q.type==='mc' ? q.choices[q.correctIndex] : q.answers[0]}</span></div>` : ''}
+        <div class="bg-[#241C4B] rounded-xl p-4 my-3 text-left space-y-1">
+          <div class="flex justify-between"><span class="text-[#B8AEE8]">Base Points</span><span class="font-700">+${basePts}</span></div>
+          <div class="flex justify-between"><span class="text-[#B8AEE8]">Speed Bonus</span><span class="font-700">+${speedBonus}</span></div>
+          <div class="flex justify-between border-t border-[#3E3475] pt-1 mt-1"><span class="font-700">TOTAL</span><span class="font-display font-700 text-[var(--green)]">+${r.score}</span></div>
+        </div>
+        <button id="btn-back" class="btn-block w-full bg-[var(--cyan)] text-[#0E0A24] py-3 mt-2">CONTINUE</button>
+      </div>
+    </div>`;
+  root.querySelector('#btn-back').addEventListener('click', ()=> renderLobby());
+}
+
+// ---------- LEADERBOARD ----------
+async function renderLeaderboard(day){
+  let activeLevel = state.player?.level || 'JH';
+  const container = document.createElement('div');
+
+  async function draw(){
+    const board = await getDailyLeaderboard(activeLevel, day);
+    root.innerHTML = html`
+      ${renderNav()}
+      <div class="p-4 max-w-md mx-auto w-full">
+        <div class="font-display text-2xl font-700 text-center mb-3">🏆 DAY ${day} LEADERBOARD</div>
+        <div class="flex gap-2 mb-4">
+          <button data-lvl="JH" class="lvl-tab btn-block flex-1 py-2 ${activeLevel==='JH'?'bg-[var(--cyan)] text-[#0E0A24]':'bg-[#241C4B]'}">JH</button>
+          <button data-lvl="SH" class="lvl-tab btn-block flex-1 py-2 ${activeLevel==='SH'?'bg-[var(--cyan)] text-[#0E0A24]':'bg-[#241C4B]'}">SH</button>
+        </div>
+        <div class="space-y-2">
+          ${board.length ? board.map((r,i)=>html`
+            <div class="block-card !shadow-none flex items-center gap-3 px-4 py-3 ${r.playerId===state.uid?'border-[var(--yellow)]':''}">
+              <div class="w-8 text-center font-display font-700">${i===0?'🥇':i===1?'🥈':i===2?'🥉':(i+1)}</div>
+              <div class="flex-1 min-w-0">
+                <div class="font-700 truncate">${r.playerName}</div>
+                <div class="text-xs text-[#B8AEE8]">Grade ${r.grade} • ${r.section}</div>
+              </div>
+              <div class="font-display font-700">${r.score} pts</div>
+            </div>`).join('') : `<div class="text-center text-[#B8AEE8] py-8">No results yet for today.</div>`}
+        </div>
+        <button id="btn-lobby" class="btn-block w-full bg-[#241C4B] mt-5 py-3">⬅ BACK TO LOBBY</button>
+      </div>
+    `;
+    root.querySelectorAll('.lvl-tab').forEach(b=> b.addEventListener('click', ()=>{ activeLevel = b.dataset.lvl; draw(); }));
+    root.querySelector('#btn-lobby').addEventListener('click', renderLobby);
+    root.querySelector('#nav-leaderboard')?.addEventListener('click', ()=> draw());
+  }
+  draw();
+}
+
+// ---------- FINALE ----------
+async function renderFinale(){
+  const days = await getCompletedDays();
+  const totalPoints = Object.values(days).reduce((s,r)=>s+(r.score||0),0);
+  const completedCount = Object.keys(days).length;
+  const avgTime = completedCount ? Math.round(Object.values(days).reduce((s,r)=>s+r.timeUsedSec,0)/completedCount) : 0;
+  const overall = await getOverallLeaderboard(state.player.level);
+  const myRank = overall.findIndex(r=>r.playerId===state.uid) + 1;
+
+  let revealBlock = '';
+  if (state.settings.revealFinal){
+    const jh = await getOverallLeaderboard('JH');
+    const sh = await getOverallLeaderboard('SH');
+    const medals = ['🥇','🥈','🥉','4.','5.'];
+    const top5 = (arr)=> arr.slice(0,5).map((r,i)=>html`
+      <div class="flex justify-between px-4 py-2 border-b border-[#3E3475] last:border-0">
+        <span class="font-700">${medals[i]} ${r.name}</span><span class="font-display font-700">${r.total} pts</span>
+      </div>`).join('');
+    revealBlock = html`
+      <div class="block-card p-4 mt-5 pop-in">
+        <div class="font-display text-xl font-700 text-center mb-3">🏆 FINAL RESULTS</div>
+        <div class="font-700 text-[var(--cyan)] mb-1">JUNIOR HIGH — TOP 5</div>
+        <div class="mb-4">${top5(jh) || '<div class="text-sm text-[#B8AEE8]">No data yet.</div>'}</div>
+        <div class="font-700 text-[var(--pink)] mb-1">SENIOR HIGH — TOP 5</div>
+        <div>${top5(sh) || '<div class="text-sm text-[#B8AEE8]">No data yet.</div>'}</div>
+      </div>`;
+  } else {
+    revealBlock = html`<div class="text-center text-[#B8AEE8] text-sm mt-5">🔒 Final Top 5 results will be revealed by the facilitator.</div>`;
+  }
+
+  root.innerHTML = html`
+    ${renderNav()}
+    <div class="p-4 max-w-md mx-auto w-full">
+      <div class="text-center">
+        <div class="text-5xl mb-2 float">🎉</div>
+        <div class="font-display text-2xl font-700">CHALLENGE COMPLETE!</div>
+        <div class="text-[#B8AEE8] text-sm">Congratulations, ${state.player.fullName}!</div>
+      </div>
+      <div class="grid grid-cols-2 gap-3 mt-5">
+        <div class="block-card p-4 text-center"><div class="text-xs text-[#B8AEE8]">TOTAL POINTS</div><div class="font-display text-2xl font-700">${totalPoints}</div></div>
+        <div class="block-card p-4 text-center"><div class="text-xs text-[#B8AEE8]">DAYS COMPLETED</div><div class="font-display text-2xl font-700">${completedCount}/10</div></div>
+        <div class="block-card p-4 text-center"><div class="text-xs text-[#B8AEE8]">AVG TIME</div><div class="font-display text-2xl font-700">${avgTime}s</div></div>
+        <div class="block-card p-4 text-center"><div class="text-xs text-[#B8AEE8]">FINAL RANK</div><div class="font-display text-2xl font-700">#${myRank||'-'}</div></div>
+      </div>
+      ${revealBlock}
+      <button id="btn-lobby" class="btn-block w-full bg-[#241C4B] mt-5 py-3">⬅ BACK</button>
+    </div>
+  `;
+  root.querySelector('#btn-lobby').addEventListener('click', renderLobby);
+}
+
+// ---------- BOOT ----------
+async function boot(){
+  root.innerHTML = html`<div class="flex-1 flex items-center justify-center"><div class="text-center"><div class="text-5xl float mb-3">🎮</div><div class="font-display">Loading Sci-Math Challenge...</div></div></div>`;
+  await loadSettings();
+  await loadPlayer();
+  if (!state.player){ renderRegister(); return; }
+  await loadTodayResult();
+  renderLobby();
+}
+
+onAuthStateChanged(auth, async (user)=>{
+  if (!user){ await signInAnonymously(auth).catch(e=>console.error('anon sign-in failed', e)); return; }
+  state.uid = user.uid;
+  boot();
+});
+</script>
+</body>
+</html>

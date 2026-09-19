@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sci-Math Challenge — Facilitator Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@600;700&family=Baloo+2:wght@500;700;800&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  :root{ --purple:#6C4FE0; --pink:#FF4F9A; --cyan:#26E5D9; --yellow:#FFD23F; --green:#4CE07A; --red:#FF5A5A; --navy:#161033; }
+  html,body{font-family:'Baloo 2', sans-serif; background:var(--navy); color:#fff; margin:0;}
+  .font-display{font-family:'Fredoka', sans-serif;}
+  .card{ background:linear-gradient(145deg, #2A2157, #1D1740); border:2px solid #3E3475; border-radius:16px; }
+  .btn{ border-radius:12px; font-weight:800; transition: filter .15s ease, transform .08s ease; }
+  .btn:active{ transform: translateY(2px); }
+  .btn:disabled{ opacity:.4; cursor:not-allowed; }
+  table{ border-collapse:collapse; width:100%; }
+  th,td{ padding:8px 10px; text-align:left; border-bottom:1px solid #3E3475; white-space:nowrap; }
+  th{ font-size:.75rem; color:#B8AEE8; text-transform:uppercase; letter-spacing:.03em; }
+  tr:hover td{ background:#241C4B; }
+  input,select{ background:#241C4B; border:2px solid #3E3475; border-radius:10px; padding:8px 12px; outline:none; color:#fff; }
+  input:focus,select:focus{ border-color:var(--cyan); }
+  .tab-btn.active{ background:var(--cyan); color:#0E0A24; }
+</style>
+</head>
+<body>
+<div id="app" class="min-h-screen"></div>
+
+<script type="module">
+import { firebaseConfig } from './firebase-config.js';
+import { QUESTIONS, getQuestionFor } from './questions.js';
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+import {
+  getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut
+} from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
+import {
+  getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs, query, where
+} from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const root = document.getElementById('app');
+const TOTAL_DAYS = 10;
+
+function html(strings, ...vals){ return strings.reduce((a,s,i)=>a+s+(vals[i]??''),''); }
+
+// ---------------- LOGIN ----------------
+function renderLogin(errorMsg=''){
+  root.innerHTML = html`
+    <div class="min-h-screen flex items-center justify-center p-4">
+      <div class="card w-full max-w-sm p-6">
+        <div class="text-center mb-4">
+          <div class="text-3xl mb-1">🛠️</div>
+          <div class="font-display text-xl font-700">FACILITATOR LOGIN</div>
+          <div class="text-xs text-[#B8AEE8]">Sci-Math Challenge Dashboard</div>
+        </div>
+        <form id="login-form" class="space-y-3">
+          <input id="l-email" type="email" required placeholder="Email" class="w-full" />
+          <input id="l-pass" type="password" required placeholder="Password" class="w-full" />
+          ${errorMsg ? `<p class="text-[var(--red)] text-sm">${errorMsg}</p>` : ''}
+          <button class="btn w-full bg-[var(--cyan)] text-[#0E0A24] py-3">LOG IN</button>
+        </form>
+        <p class="text-xs text-[#8577C2] mt-4 text-center">Access is restricted to the one facilitator account created in Firebase Authentication. This device/page is separate from the student app.</p>
+      </div>
+    </div>`;
+  root.querySelector('#login-form').addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    try{
+      await signInWithEmailAndPassword(auth, root.querySelector('#l-email').value, root.querySelector('#l-pass').value);
+    }catch(err){
+      renderLogin('Login failed — check email/password.');
+    }
+  });
+}
+
+// ---------------- DATA ----------------
+let settings = { day:1, isOpen:true, revealFinal:false };
+let players = [];
+let results = [];
+
+async function loadAll(){
+  const sSnap = await getDoc(doc(db,'settings','current'));
+  settings = sSnap.exists() ? { day:1, isOpen:true, revealFinal:false, ...sSnap.data() } : settings;
+
+  const pSnap = await getDocs(collection(db,'players'));
+  players = []; pSnap.forEach(d=> players.push({ id:d.id, ...d.data() }));
+
+  const rSnap = await getDocs(collection(db,'results'));
+  results = []; rSnap.forEach(d=> results.push({ id:d.id, ...d.data() }));
+}
+
+function resultsForDay(day){ return results.filter(r=>r.day===day); }
+function totalFor(playerId){ return results.filter(r=>r.playerId===playerId).reduce((s,r)=>s+(r.score||0),0); }
+
+// ---------------- DASHBOARD ----------------
+let activeTab = 'live'; // live | players | day
+let filter = { search:'', level:'ALL', grade:'ALL', section:'ALL' };
+
+async function renderDashboard(){
+  await loadAll();
+  draw();
+}
+
+function computeLiveRows(level){
+  const day = settings.day;
+  const lvlPlayers = players.filter(p=>p.level===level);
+  const rows = lvlPlayers.map(p=>{
+    const todays = results.find(r=>r.playerId===p.id && r.day===day);
+    return {
+      id:p.id, name:p.fullName, grade:p.grade, section:p.section,
+      pointsToday: todays ? todays.score : null,
+      timeUsed: todays ? todays.timeUsedSec : null,
+      played: !!todays,
+      total: totalFor(p.id),
+    };
+  });
+  rows.sort((a,b)=> (b.pointsToday??-1) - (a.pointsToday??-1) || b.total - a.total);
+  return rows;
+}
+
+function draw(){
+  const jh = players.filter(p=>p.level==='JH').length;
+  const sh = players.filter(p=>p.level==='SH').length;
+  const todayResults = resultsForDay(settings.day);
+  const q = getQuestionFor('JH', settings.day);
+  const qSH = getQuestionFor('SH', settings.day);
+
+  root.innerHTML = html`
+    <div class="sticky top-0 z-30 bg-[#1D1740]/95 backdrop-blur border-b-2 border-[#3E3475] px-4 py-3 flex items-center justify-between">
+      <div class="font-display text-lg font-700">🛠️ FACILITATOR DASHBOARD</div>
+      <button id="btn-logout" class="btn bg-[#241C4B] text-sm px-3 py-2">Log out</button>
+    </div>
+
+    <div class="p-4 max-w-6xl mx-auto space-y-5">
+
+      <div class="card p-4">
+        <div class="flex flex-wrap items-center gap-4 justify-between">
+          <div>
+            <div class="text-xs text-[#B8AEE8]">TODAY'S CHALLENGE</div>
+            <div class="font-display text-2xl font-700">DAY ${settings.day} of ${TOTAL_DAYS}</div>
+            <div class="text-sm text-[#B8AEE8] mt-1">JH: ${q ? `${q.subject} — ${gtLabel(q.type)}` : '—'} &nbsp;|&nbsp; SH: ${qSH ? `${qSH.subject} — ${gtLabel(qSH.type)}` : '—'}</div>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button id="btn-toggle-open" class="btn px-4 py-2 ${settings.isOpen ? 'bg-[var(--green)] text-[#0E0A24]' : 'bg-[var(--red)]'}">${settings.isOpen ? '🔓 OPEN — click to CLOSE' : '🔒 CLOSED — click to OPEN'}</button>
+            <button id="btn-prev-day" class="btn bg-[#241C4B] px-4 py-2" ${settings.day<=1?'disabled':''}>◀ Prev Day</button>
+            <button id="btn-next-day" class="btn bg-[#241C4B] px-4 py-2" ${settings.day>=TOTAL_DAYS?'disabled':''}>Next Day ▶</button>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4 text-center">
+          <div class="bg-[#241C4B] rounded-xl py-3"><div class="text-xs text-[#B8AEE8]">JH Registered</div><div class="font-display text-xl font-700">${jh}</div></div>
+          <div class="bg-[#241C4B] rounded-xl py-3"><div class="text-xs text-[#B8AEE8]">SH Registered</div><div class="font-display text-xl font-700">${sh}</div></div>
+          <div class="bg-[#241C4B] rounded-xl py-3"><div class="text-xs text-[#B8AEE8]">Played Today</div><div class="font-display text-xl font-700">${todayResults.length}</div></div>
+          <div class="bg-[#241C4B] rounded-xl py-3"><div class="text-xs text-[#B8AEE8]">Not Played Today</div><div class="font-display text-xl font-700">${Math.max(0,(jh+sh)-todayResults.length)}</div></div>
+        </div>
+        <div class="mt-4 flex flex-wrap gap-2 items-center">
+          <button id="btn-reveal" class="btn px-4 py-2 ${settings.revealFinal ? 'bg-[var(--yellow)] text-[#0E0A24]' : 'bg-[#241C4B]'}">${settings.revealFinal ? '🏆 Final results REVEALED — click to hide' : '🏆 Reveal Final Top 5'}</button>
+          <span class="text-xs text-[#8577C2]">Only turn this on after Day ${TOTAL_DAYS} is complete for everyone.</span>
+        </div>
+      </div>
+
+      <div class="flex gap-2">
+        <button data-tab="live" class="tab-btn btn bg-[#241C4B] px-4 py-2 ${activeTab==='live'?'active':''}">Live Ranking</button>
+        <button data-tab="players" class="tab-btn btn bg-[#241C4B] px-4 py-2 ${activeTab==='players'?'active':''}">All Players</button>
+        <button id="btn-export" class="btn bg-[#241C4B] px-4 py-2 ml-auto">⬇ Export CSV</button>
+      </div>
+
+      ${activeTab==='live' ? renderLiveTab() : renderPlayersTab()}
+    </div>
+  `;
+
+  root.querySelector('#btn-logout').addEventListener('click', ()=> signOut(auth));
+  root.querySelector('#btn-toggle-open').addEventListener('click', async ()=>{
+    await setDoc(doc(db,'settings','current'), { ...settings, isOpen: !settings.isOpen }, { merge:true });
+    renderDashboard();
+  });
+  root.querySelector('#btn-prev-day').addEventListener('click', async ()=>{
+    await setDoc(doc(db,'settings','current'), { ...settings, day: Math.max(1,settings.day-1), isOpen:true }, { merge:true });
+    renderDashboard();
+  });
+  root.querySelector('#btn-next-day').addEventListener('click', async ()=>{
+    await setDoc(doc(db,'settings','current'), { ...settings, day: Math.min(TOTAL_DAYS,settings.day+1), isOpen:true }, { merge:true });
+    renderDashboard();
+  });
+  root.querySelector('#btn-reveal').addEventListener('click', async ()=>{
+    await setDoc(doc(db,'settings','current'), { ...settings, revealFinal: !settings.revealFinal }, { merge:true });
+    renderDashboard();
+  });
+  root.querySelectorAll('.tab-btn').forEach(b=> b.addEventListener('click', ()=>{ activeTab = b.dataset.tab; draw(); }));
+  root.querySelector('#btn-export').addEventListener('click', exportCSV);
+
+  if (activeTab==='players') wirePlayersTab();
+}
+
+function gtLabel(t){ return { mc:'Multiple Choice', id:'Identification', solve:'Solving', clue:'4-Clue Word' }[t] || t; }
+
+function renderLiveTab(){
+  const jhRows = computeLiveRows('JH');
+  const shRows = computeLiveRows('SH');
+  const rowsHtml = (rows)=> rows.length ? rows.map((r,i)=>html`
+    <tr>
+      <td>${i+1}</td>
+      <td>${r.name}</td>
+      <td>${r.grade}</td>
+      <td>${r.section}</td>
+      <td>${r.played ? r.pointsToday : '<span class="text-[#8577C2]">—</span>'}</td>
+      <td>${r.played ? r.timeUsed+'s' : '—'}</td>
+      <td class="font-700">${r.total}</td>
+      <td>${r.played ? '✅' : '⏳'}</td>
+    </tr>`).join('') : `<tr><td colspan="8" class="text-center text-[#8577C2]">No players yet.</td></tr>`;
+
+  return html`
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div class="card p-3 overflow-x-auto">
+        <div class="font-display font-700 mb-2">🧒 JH LIVE RANKING</div>
+        <table><thead><tr><th>#</th><th>Name</th><th>Grade</th><th>Sec</th><th>Today</th><th>Time</th><th>Total</th><th>Played</th></tr></thead>
+        <tbody>${rowsHtml(jhRows)}</tbody></table>
+      </div>
+      <div class="card p-3 overflow-x-auto">
+        <div class="font-display font-700 mb-2">🧑‍🎓 SH LIVE RANKING</div>
+        <table><thead><tr><th>#</th><th>Name</th><th>Grade</th><th>Sec</th><th>Today</th><th>Time</th><th>Total</th><th>Played</th></tr></thead>
+        <tbody>${rowsHtml(shRows)}</tbody></table>
+      </div>
+    </div>`;
+}
+
+function renderPlayersTab(){
+  return html`
+    <div class="card p-3">
+      <div class="flex flex-wrap gap-2 mb-3">
+        <input id="p-search" placeholder="Search name..." value="${filter.search}" class="flex-1 min-w-[160px]" />
+        <select id="p-level">
+          <option value="ALL">All levels</option>
+          <option value="JH" ${filter.level==='JH'?'selected':''}>JH</option>
+          <option value="SH" ${filter.level==='SH'?'selected':''}>SH</option>
+        </select>
+        <select id="p-grade">
+          <option value="ALL">All grades</option>
+          ${[7,8,9,10,11,12].map(g=>`<option value="${g}" ${String(filter.grade)===String(g)?'selected':''}>Grade ${g}</option>`).join('')}
+        </select>
+        <input id="p-section" placeholder="Section filter" value="${filter.section==='ALL'?'':filter.section}" class="w-40" />
+      </div>
+      <div class="overflow-x-auto">
+        <table><thead><tr><th>Name</th><th>Level</th><th>Grade</th><th>Section</th><th>Days Played</th><th>Total Pts</th><th>Registered</th><th>Actions</th></tr></thead>
+        <tbody id="players-tbody"></tbody></table>
+      </div>
+    </div>`;
+}
+
+function wirePlayersTab(){
+  const redraw = ()=>{
+    filter.search = root.querySelector('#p-search').value.toLowerCase();
+    filter.level = root.querySelector('#p-level').value;
+    filter.grade = root.querySelector('#p-grade').value;
+    filter.section = root.querySelector('#p-section').value.toLowerCase() || 'ALL';
+
+    let rows = players.filter(p=>{
+      if (filter.search && !p.fullName.toLowerCase().includes(filter.search)) return false;
+      if (filter.level!=='ALL' && p.level!==filter.level) return false;
+      if (filter.grade!=='ALL' && String(p.grade)!==String(filter.grade)) return false;
+      if (filter.section!=='ALL' && !String(p.section).toLowerCase().includes(filter.section)) return false;
+      return true;
+    });
+
+    const tbody = document.getElementById('players-tbody');
+    tbody.innerHTML = rows.length ? rows.map(p=>{
+      const played = results.filter(r=>r.playerId===p.id).length;
+      const total = totalFor(p.id);
+      const regDate = p.registeredAt ? new Date(p.registeredAt).toLocaleDateString() : '—';
+      return html`
+      <tr>
+        <td>${p.fullName}</td><td>${p.level}</td><td>${p.grade}</td><td>${p.section}</td>
+        <td>${played}/${TOTAL_DAYS}</td><td class="font-700">${total}</td><td>${regDate}</td>
+        <td><button data-id="${p.id}" class="btn-reset btn bg-[var(--red)] text-xs px-2 py-1">Reset</button></td>
+      </tr>`;
+    }).join('') : `<tr><td colspan="8" class="text-center text-[#8577C2]">No matching players.</td></tr>`;
+
+    tbody.querySelectorAll('.btn-reset').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        const id = btn.dataset.id;
+        const p = players.find(x=>x.id===id);
+        if (!confirm(`Reset ${p.fullName}? This deletes their profile and ALL their results so they can register again.`)) return;
+        await deleteDoc(doc(db,'players', id));
+        const rDocs = results.filter(r=>r.playerId===id);
+        for (const r of rDocs){ await deleteDoc(doc(db,'results', r.id)); }
+        await renderDashboard();
+      });
+    });
+  };
+  ['#p-search','#p-level','#p-grade','#p-section'].forEach(sel=>{
+    root.querySelector(sel).addEventListener('input', redraw);
+    root.querySelector(sel).addEventListener('change', redraw);
+  });
+  redraw();
+}
+
+function exportCSV(){
+  const header = ['Full Name','Level','Grade','Section','Day','Subject','Game Type','Correct','Answer Given','Time Used (s)','Score','Timestamp'];
+  const lines = [header.join(',')];
+  results.forEach(r=>{
+    const row = [r.playerName, r.level, r.grade, r.section, r.day, r.subject, r.gameType, r.correct, r.answerGiven, r.timeUsedSec, r.score, new Date(r.timestamp).toISOString()]
+      .map(v => `"${String(v??'').replace(/"/g,'""')}"`);
+    lines.push(row.join(','));
+  });
+  const blob = new Blob([lines.join('\n')], { type:'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `scimath-results-day${settings.day}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ---------------- BOOT ----------------
+onAuthStateChanged(auth, (user)=>{
+  if (!user){ renderLogin(); return; }
+  renderDashboard();
+});
+</script>
+</body>
+</html>
