@@ -13,10 +13,10 @@
 //    then publish the rules (see firestore.rules for instructions).
 
 export const firebaseConfig = {
-  apiKey: "PASTE_YOUR_API_KEY_HERE",
-  authDomain: "PASTE_YOUR_PROJECT.firebaseapp.com",
-  projectId: "PASTE_YOUR_PROJECT_ID",
-  storageBucket: "PASTE_YOUR_PROJECT.appspot.com",
-  messagingSenderId: "PASTE_YOUR_SENDER_ID",
-  appId: "PASTE_YOUR_APP_ID",
+  apiKey: "AIzaSyA568uFpDW4Q2oUaUjMiTg2_euA8P38GkM",
+  authDomain: "sci-math-135a1.firebaseapp.com",
+  projectId: "sci-math-135a1",
+  storageBucket: "sci-math-135a1.firebasestorage.app",
+  messagingSenderId: "G-5SN3QNYYL1",
+  appId: "1:300926571343:web:180c2dc39c7ea9bae6eb3a",
 };
