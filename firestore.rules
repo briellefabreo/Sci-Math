@@ -1,0 +1,59 @@
+rules_version = '2';
+
+// SETUP:
+// 1. Replace ADMIN_UID_HERE below with the UID of the one facilitator account
+//    you created in Authentication > Users (see firebase-config.js instructions).
+// 2. In Firebase Console > Firestore Database > Rules, paste this whole file
+//    in and click "Publish".
+//
+// Design:
+// - Every player signs in anonymously (automatic, no password) — this gives
+//   each device a stable auth.uid that persists until they clear browser data,
+//   which is how returning players are recognized.
+// - Anyone can READ players/results/settings (needed for public leaderboards).
+// - A player can only create/update their OWN player doc and OWN results
+//   (doc id must equal their auth.uid, or start with their auth.uid).
+// - Only the facilitator's UID can change "settings" (advance day, open/close,
+//   reveal results) or delete/reset a player.
+// - No player can write a "score" field directly on a result they didn't just
+//   correctly compute client-side — this is a lightweight event, not a bank
+//   vault, so we trust the client's score for this school activity while
+//   still preventing a student from tampering with SOMEONE ELSE's data or
+//   submitting twice for the same day (enforced by "no update/delete" below).
+
+function isAdmin() {
+  return request.auth != null && request.auth.uid == "ADMIN_UID_HERE";
+}
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /players/{playerId} {
+      allow read: if true;
+      allow create: if request.auth != null
+                    && request.auth.uid == playerId
+                    && request.resource.data.fullName is string
+                    && request.resource.data.fullName.size() > 0
+                    && request.resource.data.level in ['JH', 'SH'];
+      // Players cannot edit their own profile after registering (prevents
+      // switching JH/SH mid-event); only the facilitator can fix/reset one.
+      allow update, delete: if isAdmin();
+    }
+
+    match /results/{resultId} {
+      allow read: if true;
+      // resultId is "<playerId>_day<N>" — this both ties the write to the
+      // signed-in player AND makes a second submission for the same day
+      // collide with an existing doc id, which "create" (not "set") blocks.
+      allow create: if request.auth != null
+                    && resultId == request.auth.uid + '_day' + string(request.resource.data.day)
+                    && request.resource.data.playerId == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    match /settings/{doc} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+  }
+}
