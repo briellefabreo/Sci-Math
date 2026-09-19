@@ -17,6 +17,6 @@ export const firebaseConfig = {
   authDomain: "sci-math-135a1.firebaseapp.com",
   projectId: "sci-math-135a1",
   storageBucket: "sci-math-135a1.firebasestorage.app",
-  messagingSenderId: "G-5SN3QNYYL1",
+  messagingSenderId: "300926571343",
   appId: "1:300926571343:web:180c2dc39c7ea9bae6eb3a",
 };
